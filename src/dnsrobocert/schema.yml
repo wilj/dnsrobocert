@@ -121,4 +121,7 @@ properties:
           type: boolean
       required: [domains, profile]
       additionalProperties: false
+  startup_hook:
+    type: string
+        
 additionalProperties: false

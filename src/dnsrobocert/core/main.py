@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import signal
+import subprocess
 import sys
 import tempfile
 import time
@@ -17,7 +18,7 @@ import schedule
 import yaml
 from certbot.compat import misc
 
-from dnsrobocert.core import certbot, config, legacy, utils
+from dnsrobocert.core import certbot, config, hooks, legacy, utils
 
 LOGGER = logging.getLogger(__name__)
 coloredlogs.install(logger=LOGGER)
@@ -27,11 +28,13 @@ def _process_config(config_path: str, directory_path: str, runtime_config_path: 
     dnsrobocert_config = config.load(config_path)
 
     if not dnsrobocert_config:
-        return
+        return False, dnsrobocert_config
 
     if dnsrobocert_config.get("draft"):
         LOGGER.info("Configuration file is in draft mode: no action will be done.")
-        return
+        return False, dnsrobocert_config
+
+    result = False
 
     with open(runtime_config_path, "w") as f:
         f.write(yaml.dump(dnsrobocert_config))
@@ -56,6 +59,7 @@ def _process_config(config_path: str, directory_path: str, runtime_config_path: 
                 domains,
                 force_renew=force_renew,
             )
+            result = True
         except BaseException as error:
             LOGGER.error(
                 f"An error occurred while processing certificate config `{certificate}`:\n{error}"
@@ -69,6 +73,9 @@ def _process_config(config_path: str, directory_path: str, runtime_config_path: 
             if domain not in lineages:
                 LOGGER.info(f"Removing the certificate {domain}")
                 certbot.revoke(runtime_config_path, directory_path, domain)
+
+    LOGGER.info(f"_process_config returning {result}")
+    return result, dnsrobocert_config
 
 
 class _Daemon:
@@ -109,6 +116,7 @@ def _watch_config(config_path: str, directory_path: str):
 
         daemon = _Daemon()
         previous_digest = ""
+        started = False
         while not daemon.do_shutdown():
             schedule.run_pending()
 
@@ -121,9 +129,26 @@ def _watch_config(config_path: str, directory_path: str):
 
                 if digest != previous_digest:
                     previous_digest = digest
-                    _process_config(
+                    result, dnsrobocert_config = _process_config(
                         effective_config_path, directory_path, runtime_config_path
                     )
+                    LOGGER.info(f"_process_config returned {result}, and started = {started}")
+                    if not started:
+                        started = result
+                        if started:
+                            startup_hook = dnsrobocert_config.get("startup_hook")
+                            LOGGER.info(f"Calling startup hook {startup_hook}")
+                            if startup_hook:
+                                if os.name == "nt":
+                                    subprocess.check_call(["powershell.exe", "-Command", startup_hook])
+                                else:
+                                    subprocess.check_call(startup_hook, shell=True)
+
+                            # LOGGER.info("calling hooks.startup(config)")
+                            # LOGGER.info(f"hooks is {hooks.startup}")
+                            # hooks.startup(config)
+                            # LOGGER.info("finished calling hooks.startup(config)")
+
             except BaseException as error:
                 LOGGER.error("An error occurred during DNSroboCert watch:")
                 LOGGER.error(error)
